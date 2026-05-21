@@ -68,8 +68,6 @@ zalozka1, zalozka2 = str_web.tabs(["🔄 Převodník objednávek", "🗂️ Spr�
 # =========================================================
 # ZÁLOŽKA 1: PŘEVODNÍK OBJEDNÁVEK
 # =========================================================
-with zalozka1:
-    str_web.subheader("1. Zdroj dat (Shoptet Objednávky z URL)")
     with zalozka1:
     str_web.subheader("📅 Ruční úprava termínů dopravy (nepovinné)")
     
