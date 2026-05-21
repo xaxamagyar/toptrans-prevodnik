@@ -294,7 +294,7 @@ with zalozka1:
                             upravena_vaha = int(celkova_vaha)
                             vahove_limity = [5, 15, 30, 50, 75, 100, 150, 200, 300, 400, 500]
                             
-                            for limit in vaheve_limity:
+                            for limit in vahove_limity:  # <--- ZDE BYLO "vaheve", OPRAVENO NA "vahove"
                                 # Pokud je váha v rozmezí: limit až limit + 4 kg
                                 if limit <= upravena_vaha <= (limit + 4):
                                     upravena_vaha = limit
