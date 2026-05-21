@@ -5,6 +5,7 @@ from xml.dom import minidom
 from datetime import datetime, timedelta
 import urllib.error
 import os
+from github import Github  # <--- TENTO NOVÝ ŘÁDEK PŘIDEJTE
 
 str_web.set_page_config(page_title="Toptrans Převodník", layout="wide")
 str_web.title("🌐 Toptrans Převodník & Správce produktů")
@@ -16,7 +17,44 @@ def nacist_katalog():
         return pd.DataFrame(columns=['ZBOZI_2', 'ZBOZI_NAZEV', 'ZBOZI_HMOTNOST', 'ZBOZI_DELKA', 'ZBOZI_SIRKA', 'ZBOZI_VYSKA'])
 
 def ulozit_katalog(df):
-    df.to_excel('products.xlsx', index=False)
+    # 1. Nejdříve uložíme Excel lokálně na disk serveru
+    local_path = 'products.xlsx'
+    df.to_excel(local_path, index=False)
+    
+    # 2. Pokusíme se odeslat soubor na GitHub pomocí tokenu z trezoru
+    try:
+        # Načtení přihlašovacích údajů ze Secrets trezoru
+        token = str_web.secrets["GITHUB_TOKEN"]
+        repo_name = str_web.secrets["GITHUB_REPO"]
+        
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        
+        # Přečteme nově uložený lokální soubor jako binární data
+        with open(local_path, 'rb') as file:
+            content = file.read()
+            
+        try:
+            # Zkusíme zjistit, zda už soubor na GitHubu existuje (potřebujeme jeho SHA kód pro přepis)
+            contents = repo.get_contents(local_path)
+            repo.update_file(
+                path=local_path,
+                message=f"Aktualizace katalogu produktů - {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                content=content,
+                sha=contents.sha
+            )
+            str_web.toast("🌐 Data byla úspěšně zálohována na GitHub!")
+        except Exception:
+            # Pokud soubor na GitHubu ještě vůbec není, vytvoříme ho jako nový
+            repo.create_file(
+                path=local_path,
+                message="První vytvoření katalogu produktů",
+                content=content
+            )
+            str_web.toast("🌐 Katalog byl nově vytvořen na GitHubu!")
+            
+    except Exception as e:
+        str_web.error(f"⚠️ Nepodařilo se odeslat data na GitHub. Zkontrolujte nastavení v Secrets. Chyba: {e}")
 
 if 'katalog' not in str_web.session_state:
     str_web.session_state.katalog = nacist_katalog()
