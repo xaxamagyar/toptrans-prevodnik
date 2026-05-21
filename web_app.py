@@ -109,9 +109,9 @@ with zalozka1:
                     
                     orders_df = orders_df[orders_df['orderItemType'].isin(['product', 'set'])]
                     
-                    # NOVÝ FILTR: Ignorovat vyřízené a stornované objednávky
-                    if 'status' in orders_df.columns:
-                        orders_df = orders_df[~orders_df['status'].isin(['Vyřízena', 'Stornována'])]
+                    # OPRAVENÝ FILTR: Ignorovat vyřízené a stornované objednávky podle správného sloupce
+                    if 'orderItemStatusName' in orders_df.columns:
+                        orders_df = orders_df[~orders_df['orderItemStatusName'].isin(['Vyřízena', 'Stornována'])]
                     eshop_produkty = orders_df['orderItemName'].dropna().unique()
 
                     # Načtení katalogu (online nebo z lokálního souboru/session_state)
