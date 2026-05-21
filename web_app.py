@@ -290,7 +290,17 @@ with zalozka1:
                                     if pd.notna(vyska_m) and float(vyska_m) > 0:
                                         ET.SubElement(pack_el, "dimensions_v").text = str(int(float(vyska_m) * 100))
                             
-                            kg_el.text = str(int(celkova_vaha))
+                            # --- INTELIGENTNÍ ZAOKROUHLENÍ VÁHY PODLE LIMITŮ ---
+                            upravena_vaha = int(celkova_vaha)
+                            vahove_limity = [5, 15, 30, 50, 75, 100, 150, 200, 300, 400, 500]
+                            
+                            for limit in vaheve_limity:
+                                # Pokud je váha v rozmezí: limit až limit + 4 kg
+                                if limit <= upravena_vaha <= (limit + 4):
+                                    upravena_vaha = limit
+                                    break # Jakmile najdeme limit, končíme hledání
+                                    
+                            kg_el.text = str(upravena_vaha)
 
                         # --- ZPRACOVÁNÍ TEXTU XML A TLAČÍTKO KE STAŽENÍ ---
                         xml_str = ET.tostring(root, encoding='utf-8')
