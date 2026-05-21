@@ -107,7 +107,7 @@ with zalozka1:
                     else:
                         orders_df = pd.read_excel(shoptet_url)
                     
-                    orders_df = orders_df[orders_df['orderItemType'] == 'product']
+                    orders_df = orders_df[orders_df['orderItemType'].isin(['product', 'set'])]
                     eshop_produkty = orders_df['orderItemName'].dropna().unique()
 
                     # Načtení katalogu (online nebo z lokálního souboru/session_state)
