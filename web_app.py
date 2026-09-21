@@ -3,7 +3,6 @@ import pandas as pd
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from datetime import datetime, timedelta
-import urllib.error
 import os
 from github import Github
 
@@ -39,14 +38,22 @@ NOVAPOST_COLUMNS = [
     'invoice_item_measurement_code', 'invoice_item_amount', 'invoice_item_cost'
 ]
 
-str_web.set_page_config(page_title="Toptrans Převodník", layout="wide")
-str_web.title("🌐 Toptrans Převodník & Správce produktů")
+str_web.set_page_config(page_title="Toptrans & Nova Post Převodník", layout="wide")
+str_web.title("🌐 Převodník & Správce produktů (Toptrans & Nova Post)")
 
 def nacist_katalog():
     if os.path.exists('products.xlsx'):
-        return pd.read_excel('products.xlsx')
+        df = pd.read_excel('products.xlsx')
+        if 'ZBOZI_TYP_DOPRAVCE' not in df.columns:
+            df['ZBOZI_TYP_DOPRAVCE'] = 'TOPTRANS'
+        else:
+            df['ZBOZI_TYP_DOPRAVCE'] = df['ZBOZI_TYP_DOPRAVCE'].fillna('TOPTRANS')
+        return df
     else:
-        return pd.DataFrame(columns=['ZBOZI_2', 'ZBOZI_NAZEV', 'ZBOZI_HMOTNOST', 'ZBOZI_DELKA', 'ZBOZI_SIRKA', 'ZBOZI_VYSKA'])
+        return pd.DataFrame(columns=[
+            'ZBOZI_2', 'ZBOZI_NAZEV', 'ZBOZI_HMOTNOST', 
+            'ZBOZI_DELKA', 'ZBOZI_SIRKA', 'ZBOZI_VYSKA', 'ZBOZI_TYP_DOPRAVCE'
+        ])
 
 def ulozit_katalog(df):
     local_path = 'products.xlsx'
@@ -87,6 +94,22 @@ if 'katalog' not in str_web.session_state:
 
 if 'chybejici_fronta' not in str_web.session_state:
     str_web.session_state.chybejici_fronta = []
+
+if 'neoverene_np_fronta' not in str_web.session_state:
+    str_web.session_state.neoverene_np_fronta = []
+
+def ziskat_baliky_pro_produkt(df_katalog, nazev_eshop, prepravce):
+    match = df_katalog[df_katalog['ZBOZI_2'] == nazev_eshop]
+    if match.empty:
+        return match
+
+    if prepravce == "Nova Post":
+        np_match = match[match['ZBOZI_TYP_DOPRAVCE'] == 'NOVAPOST']
+        if not np_match.empty:
+            return np_match
+        return match[match['ZBOZI_TYP_DOPRAVCE'].isin(['ALL', 'TOPTRANS'])]
+    else:
+        return match[match['ZBOZI_TYP_DOPRAVCE'].isin(['ALL', 'TOPTRANS'])]
 
 zalozka1, zalozka2 = str_web.tabs(["🔄 Převodník objednávek", "🗂️ Správa katalogu produktů"])
 
@@ -144,6 +167,83 @@ with zalozka1:
         horizontal=True
     )
 
+    # --- ZOBRAZENÍ FORMULÁŘE PRO SCHVÁLENÍ/ÚPRAVU NOVA POST BALÍKŮ ---
+    if len(str_web.session_state.neoverene_np_fronta) > 0:
+        str_web.error("🛑 Níže prosím potvrďte nebo upravte rozměry pro Nova Post před vygenerováním exportu:")
+        
+        neoverene_kopie = list(str_web.session_state.neoverene_np_fronta)
+        for prod_nazev in neoverene_kopie:
+            with str_web.expander(f"📦 Produkt ke schválení: **{prod_nazev}**", expanded=True):
+                toptrans_radky = str_web.session_state.katalog[
+                    (str_web.session_state.katalog['ZBOZI_2'] == prod_nazev) & 
+                    (str_web.session_state.katalog['ZBOZI_TYP_DOPRAVCE'].isin(['ALL', 'TOPTRANS']))
+                ]
+                
+                rozhodnuti = str_web.radio(
+                    f"Vyberte akci pro '{prod_nazev}':",
+                    options=["Ponechat stejné balíky z Toptransu", "Upravit balíky speciálně pro Nova Post"],
+                    key=f"radio_np_{prod_nazev}"
+                )
+                
+                if rozhodnuti == "Ponechat stejné balíky z Toptransu":
+                    if str_web.button(f"✅ Potvrdit stejné balíky pro '{prod_nazev}'", key=f"btn_same_{prod_nazev}", type="primary"):
+                        str_web.session_state.katalog.loc[str_web.session_state.katalog['ZBOZI_2'] == prod_nazev, 'ZBOZI_TYP_DOPRAVCE'] = 'ALL'
+                        ulozit_katalog(str_web.session_state.katalog)
+                        str_web.session_state.neoverene_np_fronta.remove(prod_nazev)
+                        str_web.success(f"Produkt '{prod_nazev}' schválen se stejnými rozměry.")
+                        str_web.rerun()
+                        
+                else:
+                    predloha_list = toptrans_radky.to_dict('records')
+                    vychozi_pocet = len(predloha_list) if len(predloha_list) > 0 else 1
+                    
+                    # MOŽNOST UBRAT / PŘIDAT BALÍKY
+                    pocet_bal = str_web.number_input(
+                        f"Počet balíků pro Nova Post ({prod_nazev}):", 
+                        min_value=1, 
+                        value=vychozi_pocet, 
+                        step=1, 
+                        key=f"np_e_cnt_{prod_nazev}"
+                    )
+                    
+                    hmotnosti_np, delky_np, sirky_np, vysky_np, nazvy_np = [], [], [], [], []
+                    
+                    for i in range(pocet_bal):
+                        def_val = predloha_list[i] if i < len(predloha_list) else {}
+                        str_web.markdown(f"**Úprava Balíku {i+1} pro Nova Post:**")
+                        nazev_i = str_web.text_input("Popis balíku", value=str(def_val.get('ZBOZI_NAZEV', f"Balík {i+1}")), key=f"np_e_nazev_{prod_nazev}_{i}")
+                        nazvy_np.append(nazev_i)
+                        
+                        col_v, col_d, col_s, col_h = str_web.columns(4)
+                        with col_v: hmotnosti_np.append(str_web.number_input("Hmotnost (kg)", value=float(str(def_val.get('ZBOZI_HMOTNOST', 0.0)).replace(',', '.')), step=0.1, key=f"np_e_vaha_{prod_nazev}_{i}"))
+                        with col_d: delky_np.append(str_web.number_input("Délka (m)", value=float(str(def_val.get('ZBOZI_DELKA', 0.0)).replace(',', '.')), step=0.01, key=f"np_e_delka_{prod_nazev}_{i}"))
+                        with col_s: sirky_np.append(str_web.number_input("Šířka (m)", value=float(str(def_val.get('ZBOZI_SIRKA', 0.0)).replace(',', '.')), step=0.01, key=f"np_e_sirka_{prod_nazev}_{i}"))
+                        with col_h: vysky_np.append(str_web.number_input("Výška (m)", value=float(str(def_val.get('ZBOZI_VYSKA', 0.0)).replace(',', '.')), step=0.01, key=f"np_e_vyska_{prod_nazev}_{i}"))
+                        
+                    if str_web.button(f"💾 Uložit speciální rozměry pro Nova Post ({prod_nazev})", key=f"btn_save_custom_{prod_nazev}", type="primary"):
+                        str_web.session_state.katalog.loc[(str_web.session_state.katalog['ZBOZI_2'] == prod_nazev) & (str_web.session_state.katalog['ZBOZI_TYP_DOPRAVCE'] == 'ALL'), 'ZBOZI_TYP_DOPRAVCE'] = 'TOPTRANS'
+                        
+                        # Smazat případné staré neověřené záznamy Nova Post
+                        str_web.session_state.katalog = str_web.session_state.katalog[~((str_web.session_state.katalog['ZBOZI_2'] == prod_nazev) & (str_web.session_state.katalog['ZBOZI_TYP_DOPRAVCE'] == 'NOVAPOST'))]
+                        
+                        nove_np_radky = []
+                        for i in range(pocet_bal):
+                            nove_np_radky.append({
+                                'ZBOZI_2': prod_nazev,
+                                'ZBOZI_NAZEV': nazvy_np[i],
+                                'ZBOZI_HMOTNOST': hmotnosti_np[i],
+                                'ZBOZI_DELKA': delky_np[i],
+                                'ZBOZI_SIRKA': sirky_np[i],
+                                'ZBOZI_VYSKA': vysky_np[i],
+                                'ZBOZI_TYP_DOPRAVCE': 'NOVAPOST'
+                            })
+                        
+                        str_web.session_state.katalog = pd.concat([str_web.session_state.katalog, pd.DataFrame(nove_np_radky)], ignore_index=True)
+                        ulozit_katalog(str_web.session_state.katalog)
+                        str_web.session_state.neoverene_np_fronta.remove(prod_nazev)
+                        str_web.success(f"Uloženo {pocet_bal} samostatných balíků pro Nova Post u '{prod_nazev}'.")
+                        str_web.rerun()
+
     if str_web.button("🚀 Spustit kontrolu a generovat export", type="primary"):
         if not shoptet_url:
             str_web.warning("Zadejte alespoň URL Shoptet exportu.")
@@ -168,6 +268,7 @@ with zalozka1:
                     sloupec_katalog_nazev = 'ZBOZI_2'
                     katalog_produkty = products_df[sloupec_katalog_nazev].dropna().unique()
                     
+                    # 1. Kontrola chybějících produktů v databázi
                     chybejici = [p for p in eshop_produkty if p not in katalog_produkty]
                     
                     if len(chybejici) > 0:
@@ -175,9 +276,24 @@ with zalozka1:
                         str_web.error("🛑 Generování přerušeno! Některé produkty chybí v katalogu rozměrů:")
                         for p in chybejici:
                             str_web.write(f"• {p}")
-                        str_web.info("💡 Přejděte do záložky 'Správa katalogu produktů'. Názvy tam máte připravené k rychlému vyplnění.")
+                        str_web.info("💡 Přejděte do záložky 'Správa katalogu produktů'.")
+                    
                     else:
                         str_web.session_state.chybejici_fronta = []
+                        
+                        # 2. Kontrola neověřených produktů pro Nova Post
+                        if prepravek_volba == "Nova Post":
+                            neoverene = []
+                            for p in eshop_produkty:
+                                p_rows = products_df[products_df['ZBOZI_2'] == p]
+                                typy = p_rows['ZBOZI_TYP_DOPRAVCE'].tolist()
+                                if 'NOVAPOST' not in typy and 'ALL' not in typy:
+                                    neoverene.append(p)
+                                    
+                            if len(neoverene) > 0:
+                                str_web.session_state.neoverene_np_fronta = neoverene
+                                str_web.rerun()
+
                         loading_date_str = zvolena_nakladka.strftime("%d.%m.%Y")
                         discharge_date_str = zvolena_vykladka.strftime("%d.%m.%Y")
 
@@ -256,10 +372,16 @@ with zalozka1:
                                 ET.SubElement(order_el, "hydraulic_front_discharge").text = "0"
 
                                 cena_objednavky = prvni_radek.get('price', 0)
-                                if pd.notna(cena_objednavky) and float(cena_objednavky) > 0:
+                                if pd.notna(cena_objednavky):
+                                    val_str = str(cena_objednavky).replace(',', '.').strip()
+                                    float_cena = float(val_str)
+                                else:
+                                    float_cena = 0.0
+
+                                if float_cena > 0:
                                     cod_el = ET.SubElement(order_el, "cash_on_delivery")
                                     ET.SubElement(cod_el, "type").text = "1"
-                                    ET.SubElement(cod_el, "price").text = str(int(float(cena_objednavky)))
+                                    ET.SubElement(cod_el, "price").text = str(int(float_cena))
                                     ET.SubElement(cod_el, "price_cur_id").text = "1"
                                     ET.SubElement(cod_el, "account1").text = ""
                                     ET.SubElement(cod_el, "account2").text = banka_account2 
@@ -271,7 +393,7 @@ with zalozka1:
                                 kg_el = ET.SubElement(order_el, "kg")
                                 
                                 ET.SubElement(order_el, "m3").text = ""
-                                ET.SubElement(order_el, "order_value").text = str(int(float(cena_objednavky))) if pd.notna(cena_objednavky) else "0"
+                                ET.SubElement(order_el, "order_value").text = str(int(float_cena))
                                 ET.SubElement(order_el, "order_value_currency_id").text = "1"
                                 
                                 ET.SubElement(order_el, "note_loading").text = ""
@@ -288,7 +410,7 @@ with zalozka1:
                                     mnozstvi_produktu = row['orderItemAmount']
                                     if pd.isna(mnozstvi_produktu): mnozstvi_produktu = 1
                                     
-                                    nalezeno = products_df[products_df['ZBOZI_2'] == nazev_produktu_eshop]
+                                    nalezeno = ziskat_baliky_pro_produkt(products_df, nazev_produktu_eshop, "Toptrans")
                                     
                                     for _, balik in nalezeno.iterrows():
                                         pack_el = ET.SubElement(packs_el, "pack")
@@ -297,20 +419,19 @@ with zalozka1:
                                         ET.SubElement(pack_el, "pack_id").text = "1"
                                         ET.SubElement(pack_el, "description").text = str(balik['ZBOZI_NAZEV'])[:50]
                                         
-                                        vaha_baliku = balik.get('ZBOZI_HMOTNOST', 0)
-                                        if pd.notna(vaha_baliku):
-                                            celkova_vaha += (float(vaha_baliku) * celkove_mnozstvi)
+                                        vaha_baliku = float(str(balik.get('ZBOZI_HMOTNOST', 0)).replace(',', '.')) if pd.notna(balik.get('ZBOZI_HMOTNOST')) else 0.0
+                                        celkova_vaha += (vaha_baliku * celkove_mnozstvi)
                                         
-                                        delka_m = balik.get('ZBOZI_DELKA', 0)
-                                        sirka_m = balik.get('ZBOZI_SIRKA', 0)
-                                        vyska_m = balik.get('ZBOZI_VYSKA', 0)
+                                        delka_m = float(str(balik.get('ZBOZI_DELKA', 0)).replace(',', '.')) if pd.notna(balik.get('ZBOZI_DELKA')) else 0.0
+                                        sirka_m = float(str(balik.get('ZBOZI_SIRKA', 0)).replace(',', '.')) if pd.notna(balik.get('ZBOZI_SIRKA')) else 0.0
+                                        vyska_m = float(str(balik.get('ZBOZI_VYSKA', 0)).replace(',', '.')) if pd.notna(balik.get('ZBOZI_VYSKA')) else 0.0
                                         
-                                        if pd.notna(delka_m) and float(delka_m) > 0:
-                                            ET.SubElement(pack_el, "dimensions_d").text = str(int(float(delka_m) * 100))
-                                        if pd.notna(sirka_m) and float(sirka_m) > 0:
-                                            ET.SubElement(pack_el, "dimensions_s").text = str(int(float(sirka_m) * 100))
-                                        if pd.notna(vyska_m) and float(vyska_m) > 0:
-                                            ET.SubElement(pack_el, "dimensions_v").text = str(int(float(vyska_m) * 100))
+                                        if delka_m > 0:
+                                            ET.SubElement(pack_el, "dimensions_d").text = str(int(delka_m * 100))
+                                        if sirka_m > 0:
+                                            ET.SubElement(pack_el, "dimensions_s").text = str(int(sirka_m * 100))
+                                        if vyska_m > 0:
+                                            ET.SubElement(pack_el, "dimensions_v").text = str(int(vyska_m * 100))
                                 
                                 upravena_vaha = int(celkova_vaha)
                                 vahove_limity = [5, 15, 30, 50, 75, 100, 150, 200, 300, 400, 500]
@@ -345,12 +466,10 @@ with zalozka1:
                                 
                                 radek = {col: "" for col in NOVAPOST_COLUMNS}
                                 
-                                # --- ÚDAJE ODESÍLATELE (z vybrané firmy) ---
                                 radek['sender_name'] = sender_name
                                 radek['sender_phone'] = sender_phone
                                 radek['sender_email'] = sender_email
 
-                                # --- ÚDAJE PŘÍJEMCE ---
                                 radek['order_number'] = str(cislo_objednavky)
                                 
                                 tel = prvni_radek.get('phone', '')
@@ -366,18 +485,16 @@ with zalozka1:
                                 radek['parcels_insurance_currency *'] = 'CZK'
                                 radek['payer_type *'] = 'sender'
                                 
-                                # Výpočet balíků pro danou objednávku
                                 baliky_seznam = []
                                 for index, row in polozky_v_objednavce.iterrows():
                                     nazev_produktu_eshop = row['orderItemName']
                                     mnozstvi = int(row['orderItemAmount']) if pd.notna(row['orderItemAmount']) else 1
                                     
-                                    nalezeno = products_df[products_df['ZBOZI_2'] == nazev_produktu_eshop]
+                                    nalezeno = ziskat_baliky_pro_produkt(products_df, nazev_produktu_eshop, "Nova Post")
                                     for _, b in nalezeno.iterrows():
                                         for _ in range(mnozstvi):
                                             baliky_seznam.append(b)
 
-                                # Získání hodnoty pro pojištění (ošetřuje desetinnou čárku)
                                 if 'price_insurance' in prvni_radek and pd.notna(prvni_radek['price_insurance']):
                                     val_str = str(prvni_radek['price_insurance']).replace(',', '.').strip()
                                     hodnota_pojisteni = float(val_str)
@@ -386,7 +503,6 @@ with zalozka1:
                                     val_str = str(cena_objednavky).replace(',', '.').strip() if pd.notna(cena_objednavky) else "0"
                                     hodnota_pojisteni = float(val_str)
 
-                                # Rozdělení pojištění na jednotlivé balíky
                                 pocet_baliku = len(baliky_seznam) if len(baliky_seznam) > 0 else 1
                                 cena_na_balik = int(hodnota_pojisteni / pocet_baliku)
 
@@ -406,7 +522,6 @@ with zalozka1:
                                     radek[f'parcel_{i}_category'] = 'parcel'
                                     radek[f'parcel_{i}_size'] = f"{delka_cm}*{sirka_cm}*{vyska_cm}"
 
-                                # Adresa doručení
                                 radek['recipient_city'] = str(prvni_radek.get('city', ''))
                                 radek['recipient_post_code'] = str(prvni_radek.get('zip', '')).replace(" ", "")
                                 
@@ -417,7 +532,6 @@ with zalozka1:
                                 radek['recipient_building'] = cislo_popisne if pd.notna(prvni_radek.get('house_num')) else ""
                                 radek['recipient_AddressLine1'] = ""
                                 
-                                # Dobírka (COD) - z celkové ceny objednávky (ošetřuje desetinnou čárku)
                                 cena_objednavky = prvni_radek.get('price', 0)
                                 if pd.notna(cena_objednavky):
                                     val_str = str(cena_objednavky).replace(',', '.').strip()
@@ -450,82 +564,155 @@ with zalozka1:
 # ZÁLOŽKA 2: SPRÁVA KATALOGU PRODUKTŮ
 # =========================================================
 with zalozka2:
-    str_web.header("Přidání produktu do katalogu")
+    str_web.header("📦 Správa a nastavení rozměrů produktů")
     
-    vybrany_chybejici = ""
-    if len(str_web.session_state.chybejici_fronta) > 0:
-        str_web.warning("⚠️ Máte nevyřešené chybějící produkty z posledního převodu!")
-        vybrany_chybejici = str_web.selectbox(
-            "Vyberte produkt, který chcete nyní doplnit:", 
-            options=["-- Vyberte produkt z fronty --"] + str_web.session_state.chybejici_fronta
-        )
-    
-    vychozi_nazev = vybrany_chybejici if vybrany_chybejici != "-- Vyberte produkt z fronty --" else ""
+    rezim_akce = str_web.radio(
+        "Zvolte požadovanou akci:",
+        options=["➕ Přidat nový produkt", "✏️ Upravit / vytvořit rozměry pro Nova Post z Toptransu"],
+        horizontal=True
+    )
 
-    str_web.subheader("Základní informace")
-    zbozi_2 = str_web.text_input("Přesný název ze Shoptetu", value=vychozi_nazev)
-    zbozi_nazev = str_web.text_input("Základní označení pro kurýra (např. Postel KOBE)")
-    
-    pocet_baliku = str_web.number_input("Počet různých balíků (krabic) pro tento produkt", min_value=1, value=1, step=1)
-    
-    str_web.divider()
-    str_web.subheader("Rozměry jednotlivých balíků")
-    
-    hmotnosti = []
-    delky = []
-    sirky = []
-    vysky = []
-    
-    for i in range(pocet_baliku):
-        oznaceni = f" {i+1}/{pocet_baliku}" if pocet_baliku > 1 else ""
+    df_kat = str_web.session_state.katalog
+
+    # --- MOŽNOST A: PŘIDÁNÍ NOVÉHO PRODUKTU ---
+    if rezim_akce == "➕ Přidat nový produkt":
+        vybrany_chybejici = ""
+        if len(str_web.session_state.chybejici_fronta) > 0:
+            str_web.warning("⚠️ Máte nevyřešené chybějící produkty z posledního převodu!")
+            vybrany_chybejici = str_web.selectbox(
+                "Vyberte produkt, který chcete nyní doplnit:", 
+                options=["-- Vyberte produkt z fronty --"] + str_web.session_state.chybejici_fronta
+            )
         
-        with str_web.container(border=True):
-            str_web.markdown(f"**📦 Balík {i+1}** (bude pojmenován jako: `{zbozi_nazev}{oznaceni}`)")
-            
-            col_v, col_d, col_s, col_h = str_web.columns(4)
-            with col_v:
-                h = str_web.number_input("Hmotnost (kg)", min_value=0.0, step=0.1, key=f"vaha_{i}")
-                hmotnosti.append(h)
-            with col_d:
-                d = str_web.number_input("Délka (m)", min_value=0.0, step=0.01, key=f"delka_{i}")
-                delky.append(d)
-            with col_s:
-                s = str_web.number_input("Šířka (m)", min_value=0.0, step=0.01, key=f"sirka_{i}")
-                sirky.append(s)
-            with col_h:
-                v = str_web.number_input("Výška (m)", min_value=0.0, step=0.01, key=f"vyska_{i}")
-                vysky.append(v)
-            
-    if str_web.button("💾 Uložit do databáze", type="primary"):
-        if zbozi_2.strip() == "" or zbozi_nazev.strip() == "":
-            str_web.error("Shoptet název i označení pro kurýra musí být vyplněné!")
-        else:
-            nove_radky = []
-            for i in range(pocet_baliku):
-                oznaceni = f" {i+1}/{pocet_baliku}" if pocet_baliku > 1 else ""
-                konecny_nazev_baliku = f"{zbozi_nazev.strip()}{oznaceni}"
+        vychozi_nazev = vybrany_chybejici if vybrany_chybejici != "-- Vyberte produkt z fronty --" else ""
+
+        zbozi_2 = str_web.text_input("Přesný název ze Shoptetu", value=vychozi_nazev)
+        zbozi_nazev = str_web.text_input("Základní označení pro kurýra (např. Postel KOBE)")
+        
+        typ_dopravce_volba = str_web.radio(
+            "Platnost těchto rozměrů:",
+            options=["Stejné pro Toptrans i Nova Post", "Pouze pro Toptrans", "Pouze pro Nova Post"],
+            index=0
+        )
+        
+        mapovani_typu = {
+            "Stejné pro Toptrans i Nova Post": "ALL",
+            "Pouze pro Toptrans": "TOPTRANS",
+            "Pouze pro Nova Post": "NOVAPOST"
+        }
+        
+        pocet_baliku = str_web.number_input("Počet balíků (krabic) pro tento produkt", min_value=1, value=1, step=1)
+        
+        hmotnosti, delky, sirky, vysky = [], [], [], []
+        for i in range(pocet_baliku):
+            oznaceni = f" {i+1}/{pocet_baliku}" if pocet_baliku > 1 else ""
+            with str_web.container(border=True):
+                str_web.markdown(f"**📦 Balík {i+1}** (`{zbozi_nazev}{oznaceni}`)")
+                col_v, col_d, col_s, col_h = str_web.columns(4)
+                with col_v: hmotnosti.append(str_web.number_input("Hmotnost (kg)", min_value=0.0, step=0.1, key=f"vaha_{i}"))
+                with col_d: delky.append(str_web.number_input("Délka (m)", min_value=0.0, step=0.01, key=f"delka_{i}"))
+                with col_s: sirky.append(str_web.number_input("Šířka (m)", min_value=0.0, step=0.01, key=f"sirka_{i}"))
+                with col_h: vysky.append(str_web.number_input("Výška (m)", min_value=0.0, step=0.01, key=f"vyska_{i}"))
                 
-                nove_radky.append({
-                    'ZBOZI_2': zbozi_2,
-                    'ZBOZI_NAZEV': konecny_nazev_baliku,
-                    'ZBOZI_HMOTNOST': hmotnosti[i],
-                    'ZBOZI_DELKA': delky[i],
-                    'ZBOZI_SIRKA': sirky[i],
-                    'ZBOZI_VYSKA': vysky[i]
-                })
+        if str_web.button("💾 Uložit nový produkt do databáze", type="primary"):
+            if zbozi_2.strip() == "" or zbozi_nazev.strip() == "":
+                str_web.error("Shoptet název i označení pro kurýra musí být vyplněné!")
+            else:
+                nove_radky = []
+                for i in range(pocet_baliku):
+                    oznaceni = f" {i+1}/{pocet_baliku}" if pocet_baliku > 1 else ""
+                    nove_radky.append({
+                        'ZBOZI_2': zbozi_2.strip(),
+                        'ZBOZI_NAZEV': f"{zbozi_nazev.strip()}{oznaceni}",
+                        'ZBOZI_HMOTNOST': hmotnosti[i],
+                        'ZBOZI_DELKA': delky[i],
+                        'ZBOZI_SIRKA': sirky[i],
+                        'ZBOZI_VYSKA': vysky[i],
+                        'ZBOZI_TYP_DOPRAVCE': mapovani_typu[typ_dopravce_volba]
+                    })
+                
+                str_web.session_state.katalog = pd.concat([str_web.session_state.katalog, pd.DataFrame(nove_radky)], ignore_index=True)
+                ulozit_katalog(str_web.session_state.katalog)
+                
+                if zbozi_2 in str_web.session_state.chybejici_fronta:
+                    str_web.session_state.chybejici_fronta.remove(zbozi_2)
+                
+                str_web.success(f"Úspěšně vloženo: {pocet_baliku} balík(ů) pro produkt '{zbozi_2}'.")
+                str_web.rerun()
+
+    # --- MOŽNOST B: SPECIFICKÉ BALÍKY PRO NOVA POST ---
+    else:
+        vsechny_produkty = sorted(df_kat['ZBOZI_2'].dropna().unique().tolist())
+        if not vsechny_produkty:
+            str_web.info("V katalogu zatím nemáte žádné produkty.")
+        else:
+            vybrany_prod = str_web.selectbox("Vyberte produkt z databáze:", options=vsechny_produkty)
             
-            str_web.session_state.katalog = pd.concat([str_web.session_state.katalog, pd.DataFrame(nove_radky)], ignore_index=True)
-            ulozit_katalog(str_web.session_state.katalog)
+            existujici_np = df_kat[(df_kat['ZBOZI_2'] == vybrany_prod) & (df_kat['ZBOZI_TYP_DOPRAVCE'] == 'NOVAPOST')]
+            toptrans_baliky = df_kat[(df_kat['ZBOZI_2'] == vybrany_prod) & (df_kat['ZBOZI_TYP_DOPRAVCE'].isin(['ALL', 'TOPTRANS']))]
             
-            if zbozi_2 in str_web.session_state.chybejici_fronta:
-                str_web.session_state.chybejici_fronta.remove(zbozi_2)
+            if not existujici_np.empty:
+                str_web.info("ℹ️ Tento produkt již MÁ samostatně definované balíky pro Nova Post. Zde je můžete upravit.")
+                predloha = existujici_np
+            else:
+                str_web.success("💡 Tento produkt aktuálně používá stejné balíky z Toptransu. Níže jsou předvyplněné k úpravě pro Nova Post.")
+                predloha = toptrans_baliky
+
+            pocet_baliku_np = str_web.number_input("Počet balíků pro Nova Post", min_value=1, value=len(predloha) if len(predloha) > 0 else 1, step=1)
             
-            str_web.success(f"Úspěšně vloženo: {pocet_baliku} balík(ů) pro produkt '{zbozi_2}'.")
-            str_web.rerun()
+            hmotnosti_np, delky_np, sirky_np, vysky_np, nazvy_np = [], [], [], [], []
+            
+            predloha_list = predloha.to_dict('records')
+            
+            for i in range(pocet_baliku_np):
+                default_val = predloha_list[i] if i < len(predloha_list) else {}
+                with str_web.container(border=True):
+                    str_web.markdown(f"**📦 Nova Post Balík {i+1}**")
+                    nazev_i = str_web.text_input("Popis balíku", value=str(default_val.get('ZBOZI_NAZEV', f"Balík {i+1}")), key=f"np_nazev_{i}")
+                    nazvy_np.append(nazev_i)
+                    
+                    col_v, col_d, col_s, col_h = str_web.columns(4)
+                    with col_v: hmotnosti_np.append(str_web.number_input("Hmotnost (kg)", value=float(str(default_val.get('ZBOZI_HMOTNOST', 0.0)).replace(',', '.')), step=0.1, key=f"np_vaha_{i}"))
+                    with col_d: delky_np.append(str_web.number_input("Délka (m)", value=float(str(default_val.get('ZBOZI_DELKA', 0.0)).replace(',', '.')), step=0.01, key=f"np_delka_{i}"))
+                    with col_s: sirky_np.append(str_web.number_input("Šířka (m)", value=float(str(default_val.get('ZBOZI_SIRKA', 0.0)).replace(',', '.')), step=0.01, key=f"np_sirka_{i}"))
+                    with col_h: vysky_np.append(str_web.number_input("Výška (m)", value=float(str(default_val.get('ZBOZI_VYSKA', 0.0)).replace(',', '.')), step=0.01, key=f"np_vyska_{i}"))
+            
+            col_save, col_reset = str_web.columns([2, 1])
+            with col_save:
+                if str_web.button("💾 Uložit speciální balíky pro Nova Post", type="primary"):
+                    str_web.session_state.katalog.loc[(str_web.session_state.katalog['ZBOZI_2'] == vybrany_prod) & (str_web.session_state.katalog['ZBOZI_TYP_DOPRAVCE'] == 'ALL'), 'ZBOZI_TYP_DOPRAVCE'] = 'TOPTRANS'
+                    
+                    str_web.session_state.katalog = str_web.session_state.katalog[~((str_web.session_state.katalog['ZBOZI_2'] == vybrany_prod) & (str_web.session_state.katalog['ZBOZI_TYP_DOPRAVCE'] == 'NOVAPOST'))]
+                    
+                    nove_np_radky = []
+                    for i in range(pocet_baliku_np):
+                        nove_np_radky.append({
+                            'ZBOZI_2': vybrany_prod,
+                            'ZBOZI_NAZEV': nazvy_np[i],
+                            'ZBOZI_HMOTNOST': hmotnosti_np[i],
+                            'ZBOZI_DELKA': delky_np[i],
+                            'ZBOZI_SIRKA': sirky_np[i],
+                            'ZBOZI_VYSKA': vysky_np[i],
+                            'ZBOZI_TYP_DOPRAVCE': 'NOVAPOST'
+                        })
+                    
+                    str_web.session_state.katalog = pd.concat([str_web.session_state.katalog, pd.DataFrame(nove_np_radky)], ignore_index=True)
+                    ulozit_katalog(str_web.session_state.katalog)
+                    str_web.success(f"✨ Úspěšně uloženy rozměry Nova Post pro '{vybrany_prod}'. Původní rozměry pro Toptrans zůstaly netknuté!")
+                    str_web.rerun()
+
+            with col_reset:
+                if not existujici_np.empty:
+                    if str_web.button("🔄 Vrátit k Toptransu (Smazat Nova Post balíky)"):
+                        str_web.session_state.katalog = str_web.session_state.katalog[~((str_web.session_state.katalog['ZBOZI_2'] == vybrany_prod) & (str_web.session_state.katalog['ZBOZI_TYP_DOPRAVCE'] == 'NOVAPOST'))]
+                        str_web.session_state.katalog.loc[(str_web.session_state.katalog['ZBOZI_2'] == vybrany_prod) & (str_web.session_state.katalog['ZBOZI_TYP_DOPRAVCE'] == 'TOPTRANS'), 'ZBOZI_TYP_DOPRAVCE'] = 'ALL'
+                        ulozit_katalog(str_web.session_state.katalog)
+                        str_web.success(f"Dopravce Nova Post bude u produktu '{vybrany_prod}' opět přebírat balíky z Toptransu.")
+                        str_web.rerun()
 
     str_web.divider()
-    str_web.subheader("✏️ Úprava a mazání v katalogu")
-    str_web.info("💡 Kliknutím do buňky změníte hodnotu. Zaškrtnutím políčka vlevo a stisknutím klávesy 'Delete' (nebo ikony koše) řádek smažete.")
+    str_web.subheader("✏️ Přehled a manuální úprava databáze")
+    str_web.caption("V sloupci 'ZBOZI_TYP_DOPRAVCE' značí **ALL** společný balík, **TOPTRANS** balík pouze pro Toptrans a **NOVAPOST** balík pouze pro Nova Post.")
     
     upravena_data = str_web.data_editor(
         str_web.session_state.katalog, 
@@ -537,5 +724,5 @@ with zalozka2:
     if str_web.button("💾 Definitivně uložit změny a mazání", type="primary"):
         str_web.session_state.katalog = upravena_data
         ulozit_katalog(upravena_data)
-        str_web.success("✨ Všechny změny a smazané řádky byly úspěšně uloženy do souboru products.xlsx!")
+        str_web.success("✨ Všechny změny byly úspěšně uloženy do souboru products.xlsx!")
         str_web.rerun()
